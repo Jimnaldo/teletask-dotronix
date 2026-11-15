@@ -105,6 +105,10 @@ class TeletaskHub:
         self.central_id = central_id
         self.config = config
         self._client = TeletaskClient(host, port, self._on_event, self._on_disconnect)
+        # Dotronix: "protocol": "prosoft5" in config.json for centrals running
+        # PROSOFT 5 (float sensor values, central 0 for flags and moods).
+        self.prosoft5 = str(config.get("protocol", "")).strip().lower() == "prosoft5"
+        self._client.global_central_zero = self.prosoft5
         self._reconnect_task: asyncio.Task | None = None
         self._unsub_web: Any = None
         self._components: dict[tuple[int, int], dict] = {}
@@ -391,10 +395,19 @@ class TeletaskHub:
             # The report layout is the same for every sensor zone; how its
             # values convert depends on the sensor type in config.json.
             config = self._components[key].get("config", {})
-            decoded = decode_sensor(config.get("type", "TEMPERATURE"), event.raw, config)
+            decoded = decode_sensor(
+                config.get("type", "TEMPERATURE"), event.raw, config, float_values=self.prosoft5
+            )
             if decoded is not None:
                 event.state = decoded
         prev = self._component_states.get(key)
+        if event.function in (FunctionCode.MOTOR, FunctionCode.MOTORGRP) and prev:
+            # Dotronix: start and stop reports carry different fields; merge them
+            # so the position from one report isn't wiped by the next.
+            merged = {**prev, **event.state}
+            if merged.get("state") == "OFF":
+                merged.pop("seconds_to_finish", None)
+            event.state = merged
         self._component_states[key] = event.state
         if prev != event.state:
             _LOGGER.debug(

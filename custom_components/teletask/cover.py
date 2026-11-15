@@ -23,6 +23,11 @@ from .hub import TeletaskHub
 _LOGGER = logging.getLogger(__name__)
 
 
+def _to_ha(position: int) -> int:
+    """Teletask position (% closed, 0 = OP) <-> HA position (% open). Symmetric."""
+    return 100 - max(0, min(100, int(position)))
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -56,15 +61,19 @@ class TeletaskCover(TeletaskEntity, CoverEntity):
 
     @property
     def extra_state_attributes(self) -> dict:
-        return {
+        attrs = {
             key: self._state_dict[key]
-            for key in ("sun_protection", "wind_protection", "requested_position", "seconds_to_finish")
+            for key in ("sun_protection", "wind_protection", "seconds_to_finish")
             if key in self._state_dict
         }
+        requested = self._state_dict.get("requested_position")
+        if requested is not None:
+            attrs["requested_position"] = _to_ha(requested)
+        return attrs
 
     @property
     def is_closed(self) -> bool | None:
-        pos = self._state_dict.get("current_position")
+        pos = self.current_cover_position
         if pos is None:
             return None
         return pos == 0
@@ -86,7 +95,8 @@ class TeletaskCover(TeletaskEntity, CoverEntity):
     @property
     def current_cover_position(self) -> int | None:
         """Return position 0-100 (100 = fully open)."""
-        return self._state_dict.get("current_position")
+        pos = self._state_dict.get("current_position")
+        return None if pos is None else _to_ha(pos)
 
     async def async_open_cover(self, **kwargs: Any) -> None:
         await self._hub.async_set_motor(self._number, "UP", self._function)
@@ -99,7 +109,8 @@ class TeletaskCover(TeletaskEntity, CoverEntity):
 
     async def async_set_cover_position(self, **kwargs: Any) -> None:
         position = kwargs.get(ATTR_POSITION, 0)
-        await self._hub.async_set_motor_position(self._number, position, self._function)
+        # Dotronix: HA 100 = open, Teletask 0 % = open (position is % closed).
+        await self._hub.async_set_motor_position(self._number, _to_ha(position), self._function)
 
     async def async_set_cover_tilt_position(self, **kwargs: Any) -> None:
         await self._hub.async_set_motor_tilt(self._function, self._number, kwargs.get(ATTR_TILT_POSITION, 0))

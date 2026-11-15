@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import struct
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
@@ -212,7 +214,35 @@ _ANALOG_RANGES = {
 }
 
 
-def decode_sensor(sensor_type: str, data: bytes, config: dict[str, Any] | None = None) -> dict[str, Any] | None:
+def decode_sensor_float(sensor_type: str, data: bytes) -> dict[str, Any] | None:
+    """Dotronix: PROSOFT 5 sensor report (DoIP API 5.9).
+
+    The first 4 state bytes are an IEEE 754 big-endian float. Temperatures
+    carry an offset of 273 (Kelvin); every other type is the value itself.
+    """
+    if len(data) < 4:
+        _LOGGER.warning("SENSOR report too short for a float: %s", data.hex(" "))
+        return None
+    value = struct.unpack(">f", bytes(data[:4]))[0]
+    if not math.isfinite(value):
+        return {"state": None, "value": None}
+    if sensor_type in ("TEMPERATURE", "TEMPERATURECONTROL"):
+        celsius = round(value - 273.0, 1)
+        if not -50.0 <= celsius <= 100.0:
+            return {"state": None, "value": None}
+        return {"state": celsius, "value": celsius}
+    if sensor_type == "LIGHT" and value < 0:
+        return {"state": None, "value": None}
+    value = round(value, 2)
+    return {"state": value, "value": value}
+
+
+def decode_sensor(
+    sensor_type: str,
+    data: bytes,
+    config: dict[str, Any] | None = None,
+    float_values: bool = False,
+) -> dict[str, Any] | None:
     """Decode a SENSOR report according to the sensor type in config.json.
 
     The central reports every sensor zone in the same layout; only the
@@ -220,6 +250,8 @@ def decode_sensor(sensor_type: str, data: bytes, config: dict[str, Any] | None =
     """
     config = config or {}
     sensor_type = (sensor_type or "TEMPERATURE").upper()
+    if float_values:
+        return decode_sensor_float(sensor_type, data)
     raw = _short(data, 0)
     if raw is None:
         return None
@@ -399,6 +431,9 @@ class TeletaskClient:
         self._receive_task: asyncio.Task | None = None
         self._subscribed_components: list[tuple[int, int]] = []
         self.last_error: str | None = None  # reason of the last failed connect()
+        # Dotronix: PROSOFT 5 wants central unit 0 for functions that don't
+        # belong to one central (flags, moods) — DoIP API §3.
+        self.global_central_zero = False
 
     # ------------------------------------------------------------------
     # Connection
@@ -502,7 +537,12 @@ class TeletaskClient:
         return self._frame(payload)
 
     def _build_set(self, function: int, number: int, param1: int, *data: int | None) -> bytes:
-        payload = bytes([CMD_SET, self._central_id, function, (number >> 8) & 0xFF, number & 0xFF, param1])
+        central = self._central_id
+        if self.global_central_zero and function in (
+            FunctionCode.FLAG, FunctionCode.LOCMOOD, FunctionCode.GENMOOD, FunctionCode.TIMEDMOOD,
+        ):
+            central = 0
+        payload = bytes([CMD_SET, central, function, (number >> 8) & 0xFF, number & 0xFF, param1])
         payload += bytes(d & 0xFF for d in data if d is not None)
         return self._frame(payload)
 
@@ -766,6 +806,10 @@ class TeletaskClient:
                 result["requested_position"] = state_bytes[3]
             if len(state_bytes) > 4:
                 result["current_position"] = state_bytes[4]
+            elif len(state_bytes) == 4 and not is_on:
+                # Dotronix: a stopped motor reports only 4 bytes; the position
+                # byte is then where the motor stands (DoIP API 5.3).
+                result["current_position"] = state_bytes[3]
             if len(state_bytes) > 6:
                 result["seconds_to_finish"] = _short(state_bytes, 5) / 100.0
             return result

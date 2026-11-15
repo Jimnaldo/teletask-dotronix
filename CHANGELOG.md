@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.8.1-dtx.1 (Dotronix)
+
+- Rolluikpositie omgezet naar HA-conventie (% open).
+- Positie uit 4-byte stopmelding van motoren.
+- Motorstart- en stopmeldingen samengevoegd.
+- Optie `"protocol": "prosoft5"`: 32-bit float sensoren en centrale 0 voor flags/moods.
+
+Zie DOTRONIX.md.
+
 ## [1.8.1] — 2026-11-14
 
 ### Fixed
